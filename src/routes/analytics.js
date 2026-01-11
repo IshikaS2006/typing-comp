@@ -12,54 +12,56 @@ router.get('/overview', auth, async (req, res) => {
   try {
     const organizerId = req.organizer.id;
 
-    // Get total competitions count
-    const totalCompetitions = await Competition.countDocuments({
-      organizerId,
-    });
+const [
+  totalCompetitions,
+  activeCompetitions,
+  completedCompetitions,
+  participantStats,
+  wpmStats
+] = await Promise.all([
+  Competition.countDocuments({ organizerId }),
 
-    // Get active competitions (status: 'active')
-    const activeCompetitions = await Competition.countDocuments({
-      organizerId,
-      status: 'active',
-    });
+  Competition.countDocuments({
+    organizerId,
+    status: 'active',
+  }),
 
-    // Get completed competitions
-    const completedCompetitions = await Competition.countDocuments({
-      organizerId,
-      status: 'completed',
-    });
+  Competition.countDocuments({
+    organizerId,
+    status: 'completed',
+  }),
 
-    // Get total participants across all competitions
-    const participantStats = await Competition.aggregate([
-      { $match: { organizerId } },
-      {
-        $project: {
-          participantCount: { $size: { $ifNull: ['$participants', []] } },
-        },
+  Competition.aggregate([
+    { $match: { organizerId } },
+    {
+      $project: {
+        participantCount: { $size: { $ifNull: ['$participants', []] } },
       },
-      {
-        $group: {
-          _id: null,
-          totalParticipants: { $sum: '$participantCount' },
-          avgParticipants: { $avg: '$participantCount' },
-        },
+    },
+    {
+      $group: {
+        _id: null,
+        totalParticipants: { $sum: '$participantCount' },
+        avgParticipants: { $avg: '$participantCount' },
       },
-    ]);
+    },
+  ]),
 
-    // Get average WPM across all completed rounds
-    const wpmStats = await Competition.aggregate([
-      { $match: { organizerId } },
-      { $unwind: { path: '$rounds', preserveNullAndEmptyArrays: true } },
-      { $unwind: { path: '$rounds.results', preserveNullAndEmptyArrays: true } },
-      {
-        $group: {
-          _id: null,
-          avgWPM: { $avg: '$rounds.results.wpm' },
-          maxWPM: { $max: '$rounds.results.wpm' },
-          minWPM: { $min: '$rounds.results.wpm' },
-        },
+  Competition.aggregate([
+    { $match: { organizerId } },
+    { $unwind: { path: '$rounds', preserveNullAndEmptyArrays: true } },
+    { $unwind: { path: '$rounds.results', preserveNullAndEmptyArrays: true } },
+    {
+      $group: {
+        _id: null,
+        avgWPM: { $avg: '$rounds.results.wpm' },
+        maxWPM: { $max: '$rounds.results.wpm' },
+        minWPM: { $min: '$rounds.results.wpm' },
       },
-    ]);
+    },
+  ]),
+]);
+
 
     res.json({
       success: true,
@@ -179,37 +181,42 @@ router.get('/participants', auth, async (req, res) => {
     const organizerId = req.organizer.id;
 
     // Get participant distribution by competition
-    const participantDistribution = await Competition.aggregate([
-      { $match: { organizerId } },
-      {
-        $project: {
-          name: 1,
-          code: 1,
-          participantCount: { $size: { $ifNull: ['$participants', []] } },
+    const [
+      participantDistribution,
+      topPerformers
+    ] = await Promise.all([
+      Competition.aggregate([
+        { $match: { organizerId } },
+        {
+          $project: {
+            name: 1,
+            code: 1,
+            participantCount: { $size: { $ifNull: ['$participants', []] } },
+          },
         },
-      },
-      { $sort: { participantCount: -1 } },
-      { $limit: 10 }, // Top 10 competitions by participants
+        { $sort: { participantCount: -1 } },
+        { $limit: 10 },
+      ]),
+
+      Competition.aggregate([
+        { $match: { organizerId } },
+        { $unwind: { path: '$rounds', preserveNullAndEmptyArrays: true } },
+        { $unwind: { path: '$rounds.results', preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: '$rounds.results.name',
+            avgWPM: { $avg: '$rounds.results.wpm' },
+            maxWPM: { $max: '$rounds.results.wpm' },
+            totalRounds: { $sum: 1 },
+            avgAccuracy: { $avg: '$rounds.results.accuracy' },
+          },
+        },
+        { $match: { _id: { $ne: null } } },
+        { $sort: { avgWPM: -1 } },
+        { $limit: 10 },
+      ]),
     ]);
 
-    // Get top performers across all competitions
-    const topPerformers = await Competition.aggregate([
-      { $match: { organizerId } },
-      { $unwind: { path: '$rounds', preserveNullAndEmptyArrays: true } },
-      { $unwind: { path: '$rounds.results', preserveNullAndEmptyArrays: true } },
-      {
-        $group: {
-          _id: '$rounds.results.name',
-          avgWPM: { $avg: '$rounds.results.wpm' },
-          maxWPM: { $max: '$rounds.results.wpm' },
-          totalRounds: { $sum: 1 },
-          avgAccuracy: { $avg: '$rounds.results.accuracy' },
-        },
-      },
-      { $match: { _id: { $ne: null } } },
-      { $sort: { avgWPM: -1 } },
-      { $limit: 10 }, // Top 10 performers
-    ]);
 
     res.json({
       success: true,
@@ -252,53 +259,57 @@ router.get('/trends', auth, async (req, res) => {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - daysAgo);
 
-    // Get competitions created over time
-    const competitionTrends = await Competition.aggregate([
-      {
-        $match: {
-          organizerId,
-          createdAt: { $gte: startDate },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
-          },
-          count: { $sum: 1 },
-          totalParticipants: {
-            $sum: { $size: { $ifNull: ['$participants', []] } },
+    const [
+      competitionTrends,
+      wpmTrends
+    ] = await Promise.all([
+      Competition.aggregate([
+        {
+          $match: {
+            organizerId,
+            createdAt: { $gte: startDate },
           },
         },
-      },
-      { $sort: { _id: 1 } },
-    ]);
-
-    // Get WPM trends over time
-    const wpmTrends = await Competition.aggregate([
-      {
-        $match: {
-          organizerId,
-          createdAt: { $gte: startDate },
-        },
-      },
-      { $unwind: { path: '$rounds', preserveNullAndEmptyArrays: true } },
-      { $unwind: { path: '$rounds.results', preserveNullAndEmptyArrays: true } },
-      {
-        $group: {
-          _id: {
-            $dateToString: {
-              format: '%Y-%m-%d',
-              date: { $ifNull: ['$rounds.completedAt', '$createdAt'] },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+            },
+            count: { $sum: 1 },
+            totalParticipants: {
+              $sum: { $size: { $ifNull: ['$participants', []] } },
             },
           },
-          avgWPM: { $avg: '$rounds.results.wpm' },
-          avgAccuracy: { $avg: '$rounds.results.accuracy' },
-          totalTypists: { $sum: 1 },
         },
-      },
-      { $sort: { _id: 1 } },
+        { $sort: { _id: 1 } },
+      ]),
+
+      Competition.aggregate([
+        {
+          $match: {
+            organizerId,
+            createdAt: { $gte: startDate },
+          },
+        },
+        { $unwind: { path: '$rounds', preserveNullAndEmptyArrays: true } },
+        { $unwind: { path: '$rounds.results', preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: { $ifNull: ['$rounds.completedAt', '$createdAt'] },
+              },
+            },
+            avgWPM: { $avg: '$rounds.results.wpm' },
+            avgAccuracy: { $avg: '$rounds.results.accuracy' },
+            totalTypists: { $sum: 1 },
+            },
+        },
+        { $sort: { _id: 1 } },
+      ]),
     ]);
+
 
     res.json({
       success: true,
